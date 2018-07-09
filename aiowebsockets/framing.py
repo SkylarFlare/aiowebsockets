@@ -1,9 +1,15 @@
 import struct
+import random
 
 from .exception import IncompleteFrame
 from .exception import ProtocolError
 from .constants import OPCODES
-from .fast_mask import fast_mask
+
+try:
+    from .fast_mask import fast_mask
+
+except ImportError:
+    from .utils import fast_mask
 
 
 class Frame:
@@ -14,6 +20,12 @@ class Frame:
         self.parse_payload(buffer)
 
     def parse_header(self, buffer):
+        """
+        byte 1 consists of
+         - fin (Last Frame)
+         - rsv1, rsv2, rsv3 (Reserved bits)
+         - Opcode (Operation code)
+        """
         if len(buffer) < 2:
             raise IncompleteFrame
 
@@ -33,6 +45,11 @@ class Frame:
             raise ProtocolError('OPCODE is not implemented')
 
     def parse_length(self, buffer):
+        """
+        byte 2 consists of
+         - Masked (whether the data is masked)
+         - Payload Length
+        """
         self.payload_len = buffer[1] & 0b01111111
         self.mask_start, self.payload_start = 2, 2
 
@@ -56,8 +73,11 @@ class Frame:
 
     def parse_payload(self, buffer):
         """
-        Find our mask and decode the payload, if there
-        is enough data to do that.
+        The payload also includes the mask, if
+        the data has been Masked (See byte 2).
+
+        Mask is 4 bytes, afterwards the entire
+        payload is sent
         """
         mask_keys = [0] * 4
 
@@ -90,7 +110,8 @@ class Frame:
 def EncodeFrame(B_FIN, OPCODE, data, mask=False):
     """
     Encode a websocket packet before sending to
-    the browser.
+    the browser. Bytes are identical to the Frame
+    class above.
     """
     header, body = bytearray(), bytearray()
     b0, b1 = 0, 0
@@ -119,13 +140,12 @@ def EncodeFrame(B_FIN, OPCODE, data, mask=False):
         header.append(b1)
         header.extend(struct.pack("!Q", length))
 
-    body.extend(header)
-
     if mask:
-        mask_bits = struct.pack("!I", random.getrandombits(32))
-        body.extend(mask_bits)
-        data = [b ^ mask_bits[i % 4] for i, b in enumerate(data)]
+        mask_bits = struct.pack("!I", random.getrandbits(32))
+        header.extend(mask_bits)
+        data = fast_mask(data, bytearray(mask_bits))
 
+    body.extend(header)
     body.extend(data)
 
     return body
