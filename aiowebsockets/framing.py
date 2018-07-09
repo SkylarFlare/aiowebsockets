@@ -141,6 +141,9 @@ def EncodeFrame(B_FIN, OPCODE, data, mask=False):
         header.extend(struct.pack("!Q", length))
 
     if mask:
+        if not isinstance(data, bytearray):
+            data = bytearray(data)
+
         mask_bits = struct.pack("!I", random.getrandbits(32))
         header.extend(mask_bits)
         data = fast_mask(data, bytearray(mask_bits))
