@@ -6,7 +6,7 @@ class Flags:
 
 
 # 1MB Max Buffer Size
-MAX_BUFFER_LENGTH = 1024 * 1024
+MAX_BUFFER_LENGTH = 2 << 31  # 1024 * 1024
 
 STATUS_CODES = {
     'close': 1000,

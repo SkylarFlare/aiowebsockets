@@ -9,6 +9,7 @@ try:
     from .fast_mask import fast_mask
 
 except ImportError:
+    print('Could not import fast_mask.c; defaulting to utils.fast_mask')
     from .utils import fast_mask
 
 
@@ -141,9 +142,6 @@ def EncodeFrame(B_FIN, OPCODE, data, mask=False):
         header.extend(struct.pack("!Q", length))
 
     if mask:
-        if not isinstance(data, bytearray):
-            data = bytearray(data)
-
         mask_bits = struct.pack("!I", random.getrandbits(32))
         header.extend(mask_bits)
         data = fast_mask(data, bytearray(mask_bits))

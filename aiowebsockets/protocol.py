@@ -42,6 +42,15 @@ class Protocol(asyncio.Protocol):
         self.set_nodelay()
         self.create_buffers()
 
+        self.opcode_handlers = {
+            OPCODES['stream']: self.handle_stream_frame,
+            OPCODES['text']: self.handle_binary_frame,
+            OPCODES['binary']: self.handle_binary_frame,
+            OPCODES['close']: self.handle_close_frame,
+            OPCODES['ping']: self.handle_ping_frame,
+            OPCODES['pong']: lambda x: None
+        }
+
     def data_received(self, data):
         """
         Respond to WebSocket handshake requests and then iterate
@@ -56,7 +65,11 @@ class Protocol(asyncio.Protocol):
 
                 for frame in iter(self.frame_decoder, None):
                     del self.recv_buffer[:len(frame)]
-                    self.handle_frame(frame)
+
+                    if frame.opcode not in self.opcode_handlers:
+                        raise ProtocolError('Unknown Opcode')
+
+                    self.opcode_handlers[frame.opcode](frame)
 
             except IncompleteFrame:
                 pass
@@ -83,37 +96,27 @@ class Protocol(asyncio.Protocol):
         """
         Just a wrapper so I can use iter() on data_received
         """
-        return Frame(self.recv_buffer)
+        return Frame(self.recv_buffer) if self.recv_buffer else None
 
-    def handle_frame(self, frame):
-        """
-        Handle control frames and data frames
-        """
-        if frame.opcode == OPCODES['close']:
-            self.handle_close_frame(frame)
-
-        elif not frame.fin:
-            self.handle_fragment_frame(frame)
-
-        elif frame.opcode == OPCODES['stream']:
-            self.handle_stream_frame(frame)
-
-        elif frame.opcode == OPCODES['ping']:
-            self.handle_ping_frame(frame)
-
-        elif frame.opcode == OPCODES['pong']:
-            pass
+    def handle_binary_frame(self, frame):
+        '''
+        We don't actually want to convert it to
+        an str instance, just want to check that
+        it's valid utf-8.
+        '''
+        if not frame.fin:
+            self.handle_fragment_begin(frame)
 
         elif self.flags & Flags.FRAGMENTATION_STARTED:
-            raise ProtocolError('Received fragment extension before started')
+            raise ProtocolError('Expected fragment/chunk with opcode 0')
 
         else:
-            '''
-            We don't actually want to convert it to
-            an str instance, just want to check that
-            it's valid utf-8.
-            '''
             if frame.opcode == OPCODES['text']:
+                """
+                We decode to verify that it's valid utf8 here, but because
+                we treat everything as a bytearray, we don't want the
+                resulting bytes object.
+                """
                 frame.byte_data.decode('utf-8')
 
             asyncio.ensure_future(
@@ -121,6 +124,9 @@ class Protocol(asyncio.Protocol):
             )
 
     def handle_ping_frame(self, frame):
+        if not frame.fin:
+            raise ProtocolError('Control frames must not be fragmented')
+
         self.context.write(
             EncodeFrame(True, OPCODES['pong'], frame.byte_data)
         )
@@ -145,22 +151,9 @@ class Protocol(asyncio.Protocol):
 
         raise CloseFrame(status, reason)
 
-    def handle_fragment_frame(self, frame):
-        """
-        Handles a fragment frame that is not a stream
-        """
-        if frame.opcode != OPCODES['stream']:
-            self.handle_fragment_begin(frame)
-
-        elif not self.flags & Flags.FRAGMENTATION_STARTED:
-            raise ProtocolError('Received fragment extention before start')
-
-        else:
-            self.handle_fragment_extension(frame)
-
     def handle_fragment_begin(self, frame):
         """
-        Fragment block begin
+        A fragment-beginning frame is text/binary with FIN=0
         """
         if frame.opcode in OPCODES['control']:
             raise ProtocolError('Control messages cannot be fragmented')
@@ -170,7 +163,7 @@ class Protocol(asyncio.Protocol):
         self.flags |= Flags.FRAGMENTATION_STARTED
         self.frag_opcode = frame.opcode
 
-        # Attempt to decode it, if it's a text frame
+        # Attempt to decode(verify) it, if it's a text frame
         if frame.opcode == OPCODES['text']:
             self.frag_decoder.decode(
                 frame.byte_data, final=False)
@@ -180,54 +173,47 @@ class Protocol(asyncio.Protocol):
             raise BufferExceeded()
 
         # Append fragment to the buffer
-        self.frag_buffer.clear()
-        self.frag_buffer.extend(frame.byte_data)
-
-    def handle_fragment_extension(self, frame):
-        """
-        Extends our fragment buffer
-        """
-        if self.frag_opcode == OPCODES['text']:
-            self.frag_decoder.decode(
-                frame.byte_data, final=False)
-
-        # Max Buffer length
-        if len(frame.byte_data) + len(self.frag_buffer) > MAX_BUFFER_LENGTH:
-            raise BufferExceeded()
-
         self.frag_buffer.extend(frame.byte_data)
 
     def handle_stream_frame(self, frame):
         """
-        Handle the end of a fragment stream
+        Handle a stream of fragmented messages
         """
         if not self.flags & Flags.FRAGMENTATION_STARTED:
-            raise ProtocolError('Received continuation before start')
+            raise ProtocolError('Received continuation before fin=0')
 
-        # Decode if text frame
+        # Decode if it's text frame, to make sure valid utf-8
         if self.frag_opcode == OPCODES['text']:
-            self.frag_decoder.decode(frame.byte_data, final=True)
+            self.frag_decoder.decode(frame.byte_data, final=frame.fin)
 
-        # Max Buffer length
+        # Verify buffer Length
         if len(frame.byte_data) + len(self.frag_buffer) > MAX_BUFFER_LENGTH:
-            raise BufferExceeded()
+            raise BufferExceeded
 
-        # Extend our buffer
-        buffer = self.frag_buffer.copy()
-        buffer.extend(frame.byte_data)
+        # Extend the buffer
+        self.frag_buffer.extend(frame.byte_data)
 
-        self.frag_buffer.clear()
-        self.flags &= ~Flags.FRAGMENTATION_STARTED
+        # If last chunk, callback
+        if frame.fin:
+            self.flags &= ~Flags.FRAGMENTATION_STARTED
+            buffer = self.frag_buffer.copy()
+            self.frag_buffer.clear()
 
-        # Call our async routine
-        asyncio.ensure_future(
-            self.on_message(buffer, self.frag_opcode)
-        )
+            # Callback
+            asyncio.ensure_future(
+                self.on_message(buffer, self.frag_opcode))
 
     def send(self, data, opcode=OPCODES['text']):
         """
         Send a text frame
         """
+        if not isinstance(data, bytearray):
+            if not isinstance(data, bytes):
+                raise TypeError(
+                    'Invalid data type, expecting bytes or bytearray')
+
+            data = bytearray(data)
+
         to_send = EncodeFrame(
             True, opcode, data, mask=self.flags & Flags.MASK_DATA)
 
@@ -253,6 +239,9 @@ class WebSocketProtocol(Protocol):
         raise NotImplementedError('websocket_open not implemeneted')
 
     async def on_message(self, message, type=None):
+        """
+        Server acts as an echo server by default
+        """
         self.context.write(EncodeFrame(True, type, message))
 
     def shake_hands(self):
@@ -267,8 +256,8 @@ class WebSocketProtocol(Protocol):
                 header = self.recv_buffer[:header_end]
                 del self.recv_buffer[:header_end]
 
-                result = Handshake(header)
-                self.context.write(result.response_header)
+                self.header = Handshake(header)
+                self.context.write(self.header.response_header)
                 self.flags |= Flags.HANDSHAKE_COMPLETE
 
                 self.websocket_open()
