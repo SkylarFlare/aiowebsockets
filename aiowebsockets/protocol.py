@@ -31,6 +31,7 @@ class Protocol(asyncio.Protocol):
         self.frag_buffer = bytearray()
         self.frag_opcode = None
         self.flags = Flags.AWAITING_HANDSHAKE
+        # Another reminder, self.frame_decoder = FrameDecoder(self.recv_buffer)
 
     def connection_made(self, context):
         """
@@ -64,6 +65,7 @@ class Protocol(asyncio.Protocol):
                 self.recv_buffer.extend(data)
 
                 for frame in iter(self.frame_decoder, None):
+                    # todo for frame in self.frame_decoder: __iter__ __next__
                     del self.recv_buffer[:len(frame)]
 
                     if frame.opcode not in self.opcode_handlers:
@@ -87,6 +89,9 @@ class Protocol(asyncio.Protocol):
 
             except CloseFrame as frame:
                 self.close_websocket(frame.status, frame.reason)
+
+            except KeyboardInterrupt:
+                asyncio.get_event_loop().stop()
 
         else:
             self.recv_buffer.extend(data)
@@ -119,9 +124,13 @@ class Protocol(asyncio.Protocol):
                 """
                 frame.byte_data.decode('utf-8')
 
-            asyncio.ensure_future(
+            if asyncio.iscoroutinefunction(self.on_message):
+                asyncio.ensure_future(
+                    self.on_message(frame.byte_data, frame.opcode)
+                )
+
+            else:
                 self.on_message(frame.byte_data, frame.opcode)
-            )
 
     def handle_ping_frame(self, frame):
         if not frame.fin:

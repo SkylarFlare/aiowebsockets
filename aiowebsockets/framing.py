@@ -13,6 +13,22 @@ except ImportError:
     from .utils import fast_mask
 
 
+"""
+TODO:
+When rewriting frame decoder, implement in Cython
+ keeping fast_mask, but write so that it is instantiated
+ when the server starts and keeps its state and
+ reference to our protocol's buffer.
+
+Implement FIN, OPCODE, MASKED, RSV as @property
+Implement with __iter__ and __next__ so it can
+ be directly iterated upon using
+  for frame in self.frame_decoder: process()
+
+Swap out raise IncompleteFrame for raise StopIteration
+"""
+
+
 class Frame:
 
     def __init__(self, buffer):

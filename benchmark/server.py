@@ -12,18 +12,19 @@ class Client(aiowebsockets.WebSocketProtocol):
     def websocket_open(self):
         pass
 
-    async def on_message(self, message, type):
-        """
-        async def is not required, you can make on_message
-        a serial method and my protocol will execute it
-        normally, this gains additional performance.
-
-        Use async notation when there will be await calls
-        inside the method.
-        """
+    def on_message(self, message, type):
         self.send(message, type)
         Client.bytes_per_sec += len(message)
         Client.request_count += 1
+
+    """
+    async - Incurs slight performance hit due to ensure_future
+
+    async def on_message(self, message, type):
+        self.send(message, type)
+        Client.bytes_per_sec += len(message)
+        Client.request_count += 1
+    """
 
 
 async def counter():
