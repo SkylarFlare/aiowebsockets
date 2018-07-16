@@ -8,9 +8,13 @@ import aiowebsockets
 class Client(aiowebsockets.WebSocketProtocol):
     request_count = 0
     bytes_per_sec = 0
+    client_count = 0
 
     def websocket_open(self):
-        pass
+        Client.client_count += 1
+
+    def connection_lost(self, exc):
+        Client.client_count -= 1
 
     def on_message(self, message, type):
         self.send(message, type)
@@ -32,9 +36,12 @@ async def counter():
 
     while True:
         print(
-            Client.bytes_per_sec,
-            Client.request_count,
-            time.time() * 1000 - last_iteration
+            '{} KB/s; {} RPS; {} Connections; {}'.format(
+                int(Client.bytes_per_sec / 1024),
+                Client.request_count,
+                Client.client_count,
+                time.time() * 1000 - last_iteration
+            )
         )
 
         last_iteration = time.time() * 1000

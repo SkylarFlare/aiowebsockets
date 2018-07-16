@@ -24,11 +24,24 @@ import aiowebsockets
 
 class ClientProtocol(aiowebsockets.WebSocketProtocol):
 
-  def wbesocket_open(self):
+  def websocket_open(self):
     pass
 
-  async def on_message(self, message, type):
+  """
+  Using async keyword on on_message is also acceptable,
+  though keep in mind that using async will incur a small
+  performance hit.
+  
+  async def on_message(self):
+    pass
+  """
+
+  def on_message(self, message, type):
     self.send(message)
+
+  def connection_lost(self):
+    # run any cleanup steps
+    pass
 
 
 if __name__ == '__main__':

@@ -11,7 +11,7 @@ from .exception import IncompleteFrame
 from .exception import CloseFrame
 from .exception import ProtocolError
 from .exception import BufferExceeded
-from .framing import Frame
+from .framing import FrameDecoder
 from .framing import EncodeFrame
 
 
@@ -31,7 +31,7 @@ class Protocol(asyncio.Protocol):
         self.frag_buffer = bytearray()
         self.frag_opcode = None
         self.flags = Flags.AWAITING_HANDSHAKE
-        # Another reminder, self.frame_decoder = FrameDecoder(self.recv_buffer)
+        self.frame_decoder = FrameDecoder(self.recv_buffer)
 
     def connection_made(self, context):
         """
@@ -64,17 +64,15 @@ class Protocol(asyncio.Protocol):
 
                 self.recv_buffer.extend(data)
 
-                for frame in iter(self.frame_decoder, None):
-                    # todo for frame in self.frame_decoder: __iter__ __next__
-                    del self.recv_buffer[:len(frame)]
-
+                for frame in self.frame_decoder:
                     if frame.opcode not in self.opcode_handlers:
                         raise ProtocolError('Unknown Opcode')
 
-                    self.opcode_handlers[frame.opcode](frame)
+                    if frame.rsv:
+                        raise ProtocolError('RSV Bit Must Not Be Set')
 
-            except IncompleteFrame:
-                pass
+                    self.opcode_handlers[frame.opcode](frame)
+                    del self.recv_buffer[:len(frame)]
 
             except ProtocolError:
                 self.close_websocket(STATUS_CODES['protocol-error'])
@@ -97,12 +95,6 @@ class Protocol(asyncio.Protocol):
             self.recv_buffer.extend(data)
             self.shake_hands()
 
-    def frame_decoder(self):
-        """
-        Just a wrapper so I can use iter() on data_received
-        """
-        return Frame(self.recv_buffer) if self.recv_buffer else None
-
     def handle_binary_frame(self, frame):
         '''
         We don't actually want to convert it to
@@ -122,22 +114,22 @@ class Protocol(asyncio.Protocol):
                 we treat everything as a bytearray, we don't want the
                 resulting bytes object.
                 """
-                frame.byte_data.decode('utf-8')
+                frame.data.decode('utf-8')
 
             if asyncio.iscoroutinefunction(self.on_message):
                 asyncio.ensure_future(
-                    self.on_message(frame.byte_data, frame.opcode)
+                    self.on_message(frame.data, frame.opcode)
                 )
 
             else:
-                self.on_message(frame.byte_data, frame.opcode)
+                self.on_message(frame.data, frame.opcode)
 
     def handle_ping_frame(self, frame):
         if not frame.fin:
             raise ProtocolError('Control frames must not be fragmented')
 
         self.context.write(
-            EncodeFrame(True, OPCODES['pong'], frame.byte_data)
+            EncodeFrame(frame.data, 1, OPCODES['pong'])
         )
 
     def handle_close_frame(self, frame):
@@ -145,14 +137,14 @@ class Protocol(asyncio.Protocol):
         Handles a close frame sent by a WebSocket client
         """
         status, reason, length = (
-            STATUS_CODES['close'], b'', len(frame.byte_data))
+            STATUS_CODES['close'], b'', len(frame.data))
 
         if length >= 2:
-            status = struct.unpack_from('!H', frame.byte_data[:2])[0]
+            status = struct.unpack_from('!H', frame.data[:2])[0]
             if status not in VALID_STATUS_CODES:
                 status = STATUS_CODES['protocol-error']
 
-            reason = frame.byte_data[2:]
+            reason = frame.data[2:]
             reason.decode('utf-8')
 
         elif length == 1:
@@ -175,14 +167,14 @@ class Protocol(asyncio.Protocol):
         # Attempt to decode(verify) it, if it's a text frame
         if frame.opcode == OPCODES['text']:
             self.frag_decoder.decode(
-                frame.byte_data, final=False)
+                frame.data, final=False)
 
         # Max Buffer length
-        if len(frame.byte_data) > MAX_BUFFER_LENGTH:
+        if len(frame.data) > MAX_BUFFER_LENGTH:
             raise BufferExceeded()
 
         # Append fragment to the buffer
-        self.frag_buffer.extend(frame.byte_data)
+        self.frag_buffer.extend(frame.data)
 
     def handle_stream_frame(self, frame):
         """
@@ -193,14 +185,14 @@ class Protocol(asyncio.Protocol):
 
         # Decode if it's text frame, to make sure valid utf-8
         if self.frag_opcode == OPCODES['text']:
-            self.frag_decoder.decode(frame.byte_data, final=frame.fin)
+            self.frag_decoder.decode(frame.data, final=frame.fin)
 
         # Verify buffer Length
-        if len(frame.byte_data) + len(self.frag_buffer) > MAX_BUFFER_LENGTH:
+        if len(frame.data) + len(self.frag_buffer) > MAX_BUFFER_LENGTH:
             raise BufferExceeded
 
         # Extend the buffer
-        self.frag_buffer.extend(frame.byte_data)
+        self.frag_buffer.extend(frame.data)
 
         # If last chunk, callback
         if frame.fin:
@@ -209,8 +201,13 @@ class Protocol(asyncio.Protocol):
             self.frag_buffer.clear()
 
             # Callback
-            asyncio.ensure_future(
-                self.on_message(buffer, self.frag_opcode))
+            if asyncio.iscoroutinefunction(self.on_message):
+                asyncio.ensure_future(
+                    self.on_message(buffer, self.frag_opcode)
+                )
+
+            else:
+                self.on_message(buffer, self.frag_opcode)
 
     def send(self, data, opcode=OPCODES['text']):
         """
@@ -224,11 +221,11 @@ class Protocol(asyncio.Protocol):
             data = bytearray(data)
 
         to_send = EncodeFrame(
-            True, opcode, data, mask=self.flags & Flags.MASK_DATA)
+            data, 1, opcode, mask=self.flags & Flags.MASK_DATA)
 
         self.context.write(to_send)
 
-    def close_websocket(self, status=1000, reason='', mask=False):
+    def close_websocket(self, status=1000, reason=''):
         frame = bytearray(struct.pack('!H', status))
 
         if isinstance(reason, str):
@@ -237,7 +234,7 @@ class Protocol(asyncio.Protocol):
         else:
             frame.extend(reason)
 
-        self.context.write(EncodeFrame(True, OPCODES['close'], frame, mask))
+        self.context.write(EncodeFrame(frame, 1, OPCODES['close']))
         self.context.close()
         self.recv_buffer.clear()
 
@@ -251,7 +248,7 @@ class WebSocketProtocol(Protocol):
         """
         Server acts as an echo server by default
         """
-        self.context.write(EncodeFrame(True, type, message))
+        self.context.write(EncodeFrame(message, 1, type))
 
     def shake_hands(self):
         """
