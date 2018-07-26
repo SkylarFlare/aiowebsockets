@@ -47,10 +47,10 @@ class Handshake:
             raise ValueError('Sec-WebSocket-Key not in headers')
 
         if 'Connection' not in self.headers:
-            raise ValueError('Sec-WebSocket-Key not in headers')
+            raise ValueError('Connection not in headers')
 
         if 'Upgrade' not in self.headers:
-            raise ValueError('Sec-WebSocket-Key not in headers')
+            raise ValueError('Upgrade not in headers')
 
     @property
     def response_header(self):

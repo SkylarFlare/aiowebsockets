@@ -5,7 +5,7 @@ import aiowebsockets
 
 
 async def connect_client():
-    async with aiowebsockets.Connect('wss://localhost:2053') as context:
+    async with aiowebsockets.Connect('wss://echo.websocket.org:443') as context:
         context.send(b'One arbitrary message')
         context.send(b'Another arbitrary message')
 

@@ -5,7 +5,7 @@ import aiowebsockets
 
 
 async def connect_client():
-    async with aiowebsockets.Connect('wss://localhost:2053') as context:
+    async with aiowebsockets.Connect('ws://localhost:2053') as context:
         context.send(b'{"The":"Quick","Brown":"Fox","Jumped":"Over","The":"Lazy","Dog":"."}')
 
         async for message in context:
